@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>engine-sim Web Port</title>
+<meta name="description" content="Real-time internal combustion engine simulation in the browser. An unofficial WebAssembly port of engine-sim by AngeTheGreat (Ange Yaghi).">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%230e1012%22/%3E%3Crect x=%2210%22 y=%225%22 width=%2212%22 height=%2210%22 fill=%22%23ffffff%22/%3E%3Cpath d=%22M16 15 L20 25%22 stroke=%22%23f394be%22 stroke-width=%223%22/%3E%3Ccircle cx=%2216%22 cy=%2224%22 r=%225%22 fill=%22%2377cee0%22/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css?v=1.0.0">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">ENGINE-SIM <span>WEB PORT</span> <small class="tag">unofficial</small></div>
+    <label class="field">
+      <span>Engine</span>
+      <select id="engine-select" disabled><option>Loading…</option></select>
+    </label>
+    <label class="btn file-btn" title="Load your own .mr engine script">
+      Load .mr
+      <input type="file" id="file-input" accept=".mr,text/plain" hidden>
+    </label>
+    <label class="field">
+      <span>Quality</span>
+      <select id="quality-select" title="Lower quality = lighter CPU load">
+        <option value="auto">Auto</option>
+        <option value="0">High</option>
+        <option value="1">Medium</option>
+        <option value="2">Low</option>
+        <option value="3">Very low</option>
+      </select>
+    </label>
+    <button class="btn" id="units-btn" title="Toggle units">Imperial</button>
+    <button class="btn" id="help-btn" title="Controls">? Keys</button>
+    <a class="btn" href="https://github.com/kuroron000234/engine-sim-web" target="_blank" rel="noopener" title="Source code and credits">Source</a>
+  </header>
+
+  <main id="layout">
+    <section id="left">
+      <div class="panel" id="info-panel">
+        <div class="panel-title">ENGINE</div>
+        <div id="engine-name" class="engine-name">—</div>
+        <div id="engine-specs" class="specs"></div>
+        <div id="log" class="log"></div>
+      </div>
+
+      <div class="panel" id="control-panel">
+        <div class="panel-title">CONTROLS</div>
+        <div class="ctrl-grid">
+          <button class="ctl" id="btn-ignition" data-key="A"><b>A</b> Ignition</button>
+          <button class="ctl hold" id="btn-starter" data-key="S"><b>S</b> Starter</button>
+          <button class="ctl" id="btn-dyno" data-key="D"><b>D</b> Dyno</button>
+          <button class="ctl" id="btn-hold" data-key="H"><b>H</b> Hold</button>
+          <button class="ctl" id="btn-gear-down" data-key="↓"><b>↓</b> Gear −</button>
+          <button class="ctl" id="btn-gear-up" data-key="↑"><b>↑</b> Gear +</button>
+          <button class="ctl hold wide" id="btn-clutch" data-key="Shift"><b>Shift</b> Clutch</button>
+        </div>
+        <label class="slider">
+          <span>Throttle <em id="throttle-val">0%</em></span>
+          <input type="range" id="throttle" min="0" max="100" value="0" step="1">
+        </label>
+        <label class="slider">
+          <span>Clutch <em id="clutch-val">100%</em></span>
+          <input type="range" id="clutch" min="0" max="100" value="100" step="1">
+        </label>
+        <label class="slider">
+          <span>Volume <em id="volume-val">100%</em></span>
+          <input type="range" id="volume" min="0" max="100" value="100" step="1">
+        </label>
+      </div>
+
+      <div class="panel" id="perf-panel">
+        <div class="panel-title">PERFORMANCE</div>
+        <div id="perf" class="kv"></div>
+      </div>
+    </section>
+
+    <section id="center">
+      <div class="panel view-panel">
+        <canvas id="engine-view"></canvas>
+        <div id="view-hint">F1/F2 rotate · M/, layer · 1–5 slow motion</div>
+      </div>
+      <div class="panel scope-panel">
+        <div class="scope-tabs">
+          <button class="tab active" data-scope="wave">Waveform</button>
+          <button class="tab" data-scope="dyno">Torque / Power</button>
+          <button class="tab" data-scope="cyl">Cylinders</button>
+        </div>
+        <canvas id="scope"></canvas>
+      </div>
+    </section>
+
+    <section id="right">
+      <div class="panel gauge-panel">
+        <canvas id="gauges"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <footer>Simulation &amp; sound: <a href="https://github.com/ange-yaghi/engine-sim" target="_blank" rel="noopener">engine-sim</a> by AngeTheGreat (MIT) · Unofficial web port · <a href="https://github.com/kuroron000234/engine-sim-web" target="_blank" rel="noopener">source &amp; licenses</a></footer>
+
+  <div id="start-overlay">
+    <div class="start-card">
+      <div class="brand big">ENGINE-SIM <span>WEB PORT</span></div>
+      <p>An unofficial browser port of <a href="https://github.com/ange-yaghi/engine-sim" target="_blank" rel="noopener">engine-sim</a>, the real-time engine simulator created by <b>AngeTheGreat</b> (Ange Yaghi). The simulation and sound synthesis are his code, compiled to WebAssembly.</p>
+      <button id="start-btn" class="btn primary" disabled>Loading simulator…</button>
+      <p class="small">Press <b>A</b> for ignition, hold <b>S</b> to crank, then <b>Q W E R</b> or the throttle slider.</p>
+      <p class="small credit">Not affiliated with or endorsed by the original author. Want the real thing? Get the <a href="https://github.com/Engine-Simulator/engine-sim-community-edition/releases" target="_blank" rel="noopener">desktop app</a> and support the author on <a href="https://www.patreon.com/atg_engine_simulator" target="_blank" rel="noopener">Patreon</a>.</p>
+    </div>
+  </div>
+
+  <div id="help" hidden>
+    <div class="help-card">
+      <div class="panel-title">KEYBOARD</div>
+      <table>
+        <tr><td>A</td><td>Ignition on / off</td></tr>
+        <tr><td>S (hold)</td><td>Starter motor</td></tr>
+        <tr><td>Q / W / E / R (hold)</td><td>Throttle 1% / 10% / 20% / 100%</td></tr>
+        <tr><td>Space + wheel</td><td>Fine throttle (holds the setting)</td></tr>
+        <tr><td>↑ / ↓</td><td>Gear up / down (below 1st is neutral)</td></tr>
+        <tr><td>Shift (hold)</td><td>Disengage clutch</td></tr>
+        <tr><td>T / U (hold)</td><td>Slip clutch less / more · Y keeps it</td></tr>
+        <tr><td>D</td><td>Dynamometer on / off</td></tr>
+        <tr><td>H</td><td>Dyno hold · G + wheel sets hold speed</td></tr>
+        <tr><td>1 – 5 (hold)</td><td>Slow motion (1/10 … 1/1000)</td></tr>
+        <tr><td>Z / X / C / V / B + wheel</td><td>Volume / convolution / HF gain / LF noise / HF noise</td></tr>
+        <tr><td>N + wheel</td><td>Simulation frequency</td></tr>
+        <tr><td>M / ,</td><td>Render layer deeper / shallower</td></tr>
+        <tr><td>F1 / F2 / F3</td><td>Rotate view / reset</td></tr>
+      </table>
+      <button class="btn" id="help-close">Close</button>
+    </div>
+  </div>
+</div>
+<script src="main.js?v=1.0.0"></script>
+</body>
+</html>
