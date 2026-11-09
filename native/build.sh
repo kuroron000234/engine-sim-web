@@ -40,7 +40,7 @@ else
   if ! command -v em++ >/dev/null; then
     [ -f "${EMSDK:-/tmp/emsdk}/emsdk_env.sh" ] && source "${EMSDK:-/tmp/emsdk}/emsdk_env.sh" >/dev/null 2>&1
   fi
-  CXX=em++; FLAGS="-O3 -std=c++17 -w -fexceptions -msimd128 -flto"
+  CXX=em++; FLAGS="-O3 -std=c++17 -w -fexceptions -msimd128 -flto -ffast-math -fno-finite-math-only"
 fi
 
 objname() { echo "$OUT/obj-$MODE/$(echo "$1" | md5sum | cut -c1-8)_$(basename "$1" .cpp).o"; }
@@ -65,7 +65,7 @@ else
   rm -f "$STAGE/assets/web_main.mr"
   rm -rf "$STAGE/assets/sound-library"   # unused by the bundled scripts (es/sound-library is used)
   cd "$HERE/../web"
-  em++ "${OBJS[@]}" -o engine.js -O3 -flto -msimd128 -fexceptions \
+  em++ "${OBJS[@]}" -o engine.js -O3 -flto -msimd128 -ffast-math -fno-finite-math-only -fexceptions \
     -sMODULARIZE=1 -sEXPORT_NAME=EngineSimModule -sENVIRONMENT=worker \
     -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=64MB -sSTACK_SIZE=1MB \
     -sEXPORTED_RUNTIME_METHODS=FS,cwrap,UTF8ToString,stringToNewUTF8,HEAP16,HEAPF64 \

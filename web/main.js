@@ -176,6 +176,7 @@ function onWorkerMessage(ev) {
     S.scope = m.scope;
     S.audioLead = m.audioLead;
     S.load = m.load;
+    S.underruns = m.underruns || 0;
     S.dirty = true;
     S.panelDirty = true;
     onState();
@@ -247,6 +248,7 @@ function onState() {
       ['Physics / frame', `${(st[21] / 1000).toFixed(2)} ms`],
       ['Input latency', `${(st[18] * 1000).toFixed(0)} / ${(st[19] * 1000).toFixed(0)} ms`],
       ['Audio queue', `${(S.audioLead * 1000).toFixed(0)} ms`],
+      ['Audio gaps', `${S.underruns}`],
       ['Sim speed', st[40] === 1 ? 'real time' : `1/${Math.round(1 / st[40])}`],
       ['Quality', `${S.quality.mode === 'auto' ? 'Auto · ' : ''}${S.quality.name}`],
       ['CPU load', `${Math.round(S.load * 100)}% of real time`],

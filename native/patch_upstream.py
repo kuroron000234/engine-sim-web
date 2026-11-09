@@ -166,3 +166,69 @@ p = root / 'src/convolution_filter.cpp'
 if 'Web port: same result' not in p.read_text():
     p.write_text(CONV_CPP)
     print('patched src/convolution_filter.cpp')
+
+# 5) Synthesizer input: average the exhaust pressure over the fluid sub-steps instead of
+#    sampling it once per rigid-body step (point sampling aliases fluid-rate ripple into the
+#    audible band, heard as a high "knocking" buzz at reduced simulation frequencies), and
+#    drop an unused static array that overflowed for engines with more than 8 cylinders.
+def pes(s):
+    if 'ESWEB exhaust averaging' in s:
+        return s
+    s = s.replace('#include <set>', '''#include <set>
+#include <vector>
+
+// ESWEB exhaust averaging (web port)
+static std::vector<double> s_exhaustAccum;
+static int s_exhaustAccumCount = 0;
+
+static inline double esweb_exhaustTerm(CombustionChamber *chamber) {
+    return 1.0 * (chamber->m_exhaustRunnerAndPrimary.pressure() - units::pressure(1.0, units::atm))
+        + 0.1 * chamber->m_exhaustRunnerAndPrimary.dynamicPressure(1.0, 0.0)
+        + 0.1 * chamber->m_exhaustRunnerAndPrimary.dynamicPressure(-1.0, 0.0);
+}''', 1)
+    old_loop = '''        for (int j = 0; j < cylinderCount; ++j) {
+            m_engine->getChamber(j)->flow(fluidTimestep);
+        }
+    }'''
+    new_loop = '''        for (int j = 0; j < cylinderCount; ++j) {
+            m_engine->getChamber(j)->flow(fluidTimestep);
+        }
+
+        if ((int)s_exhaustAccum.size() != cylinderCount) {
+            s_exhaustAccum.assign(cylinderCount, 0.0);
+            s_exhaustAccumCount = 0;
+        }
+        for (int j = 0; j < cylinderCount; ++j) {
+            s_exhaustAccum[j] += esweb_exhaustTerm(m_engine->getChamber(j));
+        }
+        ++s_exhaustAccumCount;
+    }'''
+    assert old_loop in s, 'fluid loop not found'
+    s = s.replace(old_loop, new_loop, 1)
+    old_flow = '''        double exhaustFlow =
+            attenuation_3 * 1600 * (
+                1.0 * (chamber->m_exhaustRunnerAndPrimary.pressure() - units::pressure(1.0, units::atm))
+                + 0.1 * chamber->m_exhaustRunnerAndPrimary.dynamicPressure(1.0, 0.0)
+                + 0.1 * chamber->m_exhaustRunnerAndPrimary.dynamicPressure(-1.0, 0.0));
+
+        lastValveLift[i] = head->exhaustValveLift(piston->getCylinderIndex());
+'''
+    new_flow = '''        const double exhaustTerm =
+            (s_exhaustAccumCount > 0 && i < (int)s_exhaustAccum.size())
+            ? s_exhaustAccum[i] / s_exhaustAccumCount
+            : esweb_exhaustTerm(chamber);
+        double exhaustFlow = attenuation_3 * 1600 * exhaustTerm;
+'''
+    assert old_flow in s, 'exhaust flow expression not found'
+    s = s.replace(old_flow, new_flow, 1)
+    s = s.replace('    static double lastValveLift[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };\n', '')
+    old_end = '''    synthesizer().writeInput(m_exhaustFlowStagingBuffer);
+}'''
+    new_end = '''    for (double &v : s_exhaustAccum) v = 0.0;
+    s_exhaustAccumCount = 0;
+
+    synthesizer().writeInput(m_exhaustFlowStagingBuffer);
+}'''
+    s = s.replace(old_end, new_end, 1)
+    return s
+edit('src/piston_engine_simulator.cpp', pes)

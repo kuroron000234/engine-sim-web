@@ -81,6 +81,7 @@ double g_simSpeed = 1.0;
 bool g_starter = false;
 double g_physMs = 0, g_audioMs = 0;
 double g_baseFreq = 10000;
+double g_cutFactor = 0.3;
 std::vector<std::vector<int16_t>> g_irs;
 std::vector<float> g_irVolumes;
 int g_irLimit = 10000;
@@ -358,8 +359,36 @@ API void es_set_ir_limit(int samples) {
 
 API void es_set_quality(double freqScale, int fluidSteps) {
     if (!g_sim) return;
-    g_sim->setSimulationFrequency((int)clampd(g_baseFreq * freqScale, 400, 400000));
-    if (PistonEngineSimulator *ps = dynamic_cast<PistonEngineSimulator *>(g_sim)) ps->setFluidSimulationSteps((int)clampd(fluidSteps, 1, 16));
+    // Floor: the rigid-body solver diverges for some engines below ~2.5-3.3 kHz (Hayabusa, LFA V10),
+    // and keep at least 16 steps per crank revolution at redline.
+    const double redlineRps = g_engine->getRedline() / (2 * constants::pi);
+    const double floorFreq = std::min(g_baseFreq, std::max(3500.0, redlineRps * 16.0));
+    g_sim->setSimulationFrequency((int)clampd(std::max(g_baseFreq * freqScale, floorFreq), 400, 400000));
+    const double actualScale = g_sim->getSimulationFrequency() / g_baseFreq;
+    if (PistonEngineSimulator *ps = dynamic_cast<PistonEngineSimulator *>(g_sim)) {
+        ps->setFluidSimulationSteps((int)clampd(fluidSteps, 1, 32));
+        // Upstream sizes the exhaust delay lines for 10000 steps/s at the engine's own
+        // frequency. Rescale them so pulse timing (and the timbre) stays the same.
+        for (int i = 0; i < g_engine->getCylinderCount(); ++i) {
+            Piston *piston = g_engine->getChamber(i)->getPiston();
+            CylinderHead *head = g_engine->getChamber(i)->getCylinderHead();
+            ExhaustSystem *exhaust = head->getExhaustSystem(piston->getCylinderIndex());
+            const double exhaustLength = head->getHeaderPrimaryLength(piston->getCylinderIndex()) + exhaust->getLength();
+            const double delay = exhaustLength / (343.0 * units::m / units::sec);
+            ps->m_delayFilters[i].m_history.destroy();
+            ps->m_delayFilters[i].initialize(delay, 10000.0 * actualScale);
+        }
+    }
+    // The synthesizer's input runs at the simulation frequency. Keep its anti-aliasing
+    // cutoff (1.9 kHz upstream) below that rate's Nyquist so interpolation images don't
+    // leak through at reduced frequencies.
+    Synthesizer &syn = g_sim->synthesizer();
+    const float cutoff = (actualScale > 0.999)
+        ? 1900.0f
+        : (float)std::min(1900.0, g_cutFactor * g_sim->getSimulationFrequency());
+    for (int i = 0; i < syn.m_inputChannelCount; ++i) {
+        syn.m_filters[i].antialiasing.setCutoffFrequency(cutoff, syn.m_audioSampleRate);
+    }
 }
 API void es_set_sim_frequency(double f) { if (g_sim) g_sim->setSimulationFrequency((int)clampd(f, 400, 400000)); }
 API void es_set_audio(double volume, double convolution, double hf, double lfNoise, double hfNoise) {
@@ -529,20 +558,36 @@ int main(int argc, char **argv) {
     m.close();
     if (!es_load("web_main.mr")) { printf("ERR: %s\n", es_error()); return 1; }
     printf("info: %.300s...\n", es_info());
+    if (getenv("CUT")) g_cutFactor = atof(getenv("CUT"));
     if (getenv("IR")) es_set_ir_limit(atoi(getenv("IR")));
     if (getenv("FS")) es_set_quality(atof(getenv("FS")), getenv("FLUID") ? atoi(getenv("FLUID")) : 8);
     es_set_starter(1);
     es_set_ignition(1);
     long total = 0;
+    std::vector<int16_t> wavOut;
     auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < 600; ++i) {
         if (i == 120) es_set_starter(0);
         if (i == 300) es_set_throttle(1.0);
-        total += es_frame(getenv("FDT") ? atof(getenv("FDT")) : 1 / 60.0, 1 / 60.0, 735);
+        const int got = es_frame(getenv("FDT") ? atof(getenv("FDT")) : 1 / 60.0, 1 / 60.0, 735);
+        total += got;
+        wavOut.insert(wavOut.end(), g_audio.begin(), g_audio.begin() + got);
         if (i % 60 == 0) printf("t=%.1fs rpm=%.0f thr=%.2f sc=%.2f steps=%.0f lat=%.3f audio=%ld\n", i / 60.0, g_state[0]*60/6.2832, g_state[7], g_state[26], g_state[20], g_state[18], total);
     }
     auto t1 = std::chrono::steady_clock::now();
     printf("phys %.2fms audio %.2fms per frame\n", g_physMs, g_audioMs);
+    if (const char *wp = getenv("WAV")) {
+        // Write 16-bit mono 44.1 kHz WAV for offline analysis.
+        std::ofstream w(wp, std::ios::binary);
+        const uint32_t dataBytes = (uint32_t)wavOut.size() * 2, rate = 44100, byteRate = rate * 2;
+        const uint32_t riffSize = 36 + dataBytes, fmtSize = 16;
+        const uint16_t pcm = 1, ch = 1, align = 2, bits = 16;
+        w.write("RIFF", 4); w.write((const char *)&riffSize, 4); w.write("WAVEfmt ", 8);
+        w.write((const char *)&fmtSize, 4); w.write((const char *)&pcm, 2); w.write((const char *)&ch, 2);
+        w.write((const char *)&rate, 4); w.write((const char *)&byteRate, 4); w.write((const char *)&align, 2);
+        w.write((const char *)&bits, 2); w.write("data", 4); w.write((const char *)&dataBytes, 4);
+        w.write((const char *)wavOut.data(), dataBytes);
+    }
     printf("10s simulated in %.2fs wall, audio samples=%ld\n", std::chrono::duration<double>(t1 - t0).count(), total);
     return 0;
 }

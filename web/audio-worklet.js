@@ -10,6 +10,9 @@ class EngineSimOutput extends AudioWorkletProcessor {
     this.step = 44100 / sampleRate;
     this.reportAt = 0;
     this.ext = null;
+    this.last = 0;
+    this.fadeIn = 1;
+    this.underruns = 0;
     this.port.onmessage = (e) => {
       if (e.data && e.data.type === 'port') {
         this.ext = e.data.port;
@@ -41,8 +44,9 @@ class EngineSimOutput extends AudioWorkletProcessor {
     const out = outputs[0];
     const ch0 = out[0];
     const n = ch0.length;
+    let starved = false;
     for (let i = 0; i < n; ++i) {
-      let v = 0;
+      let v;
       if (this.w - this.r > 1) {
         const i0 = Math.floor(this.r);
         const f = this.r - i0;
@@ -52,13 +56,22 @@ class EngineSimOutput extends AudioWorkletProcessor {
         const nr = this.r + this.step;
         this.consumed += Math.floor(nr) - i0;
         this.r = nr;
+        // Fade back in after a gap instead of jumping to the new level.
+        if (this.fadeIn < 1) { this.fadeIn = Math.min(1, this.fadeIn + 1 / 256); v = this.last * (1 - this.fadeIn) + v * this.fadeIn; }
+      } else {
+        // Buffer ran dry (CPU couldn't keep up): decay smoothly to silence, no click.
+        starved = true;
+        v = this.last * 0.995;
+        this.fadeIn = 0;
       }
+      this.last = v;
       ch0[i] = v;
     }
+    if (starved) this.underruns++;
     for (let c = 1; c < out.length; ++c) out[c].set(ch0);
     if (currentFrame >= this.reportAt) {
       this.reportAt = currentFrame + 512;
-      if (this.ext) this.ext.postMessage({ consumed: this.consumed });
+      if (this.ext) this.ext.postMessage({ consumed: this.consumed, underruns: this.underruns });
     }
     return true;
   }

@@ -86,15 +86,22 @@ build.
 
 The **Quality** menu trades fidelity for speed:
 
-| Level | Simulation frequency | Fluid sub-steps | Impulse response |
-|---|---|---|---|
-| High | engine default (5–20 kHz) | 8 | up to 10,000 samples |
-| Medium | 75% | 6 | 6,000 |
-| Low | 50% | 4 | 3,000 |
-| Very low | 35% | 3 | 1,500 |
+| Level | Rigid-body frequency | Fluid sub-steps | Impulse response | Native cost (EJ25) |
+|---|---|---|---|---|
+| High | engine default (5–20 kHz) | 8 | up to 10,000 samples | 1× |
+| Medium | 50% | 8 | 6,000 | ≈ 0.5× |
+| Low | 25% | 8 | 3,000 | ≈ 0.3× |
+| Very low | 15% | 8 | 1,500 | ≈ 0.2× |
+| Ultra low | 10% | 6 | 800 | ≈ 0.15–0.2× |
 
-**Auto** (the default) measures how long each frame takes compared with the simulated time. It
-steps down when the CPU can't keep up and steps back up when there is headroom. If the machine
+The rigid-body frequency never goes below `max(3.5 kHz, 16 steps per crank revolution at
+redline)`, or the engine's own rate if that is lower. Below about 2.5–3.3 kHz the constraint
+solver diverges for some engines (Hayabusa, LFA V10). Fluid sub-steps stay at 6–8 because
+fewer steps make the gas simulation itself noisy (see *Audio quality at reduced settings*).
+
+**Auto** (the default) measures how long each frame takes compared with the simulated time, and
+watches for audio gaps. It steps down when the CPU can't keep up and steps back up when there
+is headroom. If the machine
 is still too slow, the simulation runs slower than real time instead of glitching.
 
 Other optimizations in this port:
@@ -103,10 +110,37 @@ Other optimizations in this port:
   always contiguous, and uses WebAssembly SIMD (`f32x4`). Audio synthesis used to take 25–40%
   of each frame; it now takes a few percent. The math is the same (Σ h[i]·x[n−i]), only the
   summation order differs.
-- LTO + `-O3`. The simulation runs in a worker, so the UI thread only draws.
+- LTO, `-O3` and `-ffast-math -fno-finite-math-only` (keeps the simulator's NaN guards
+  working). Measured about 5–13% faster natively with unchanged behavior.
+- If the audio buffer runs dry, the worklet fades out and back in instead of clicking.
+- The simulation runs in a worker, so the UI thread only draws.
 - Drawing happens only when new data arrives; gauges redraw at half rate, and the low levels
   also reduce canvas resolution.
 - Only the impulse responses the scripts reference are bundled (≈0.85 MB instead of 5.4 MB).
+
+### Audio quality at reduced settings
+
+The first version of the quality setting simply lowered both the simulation frequency and the
+fluid sub-steps. That added a high-pitched, knocking buzz (1–3 kHz) at idle: 0.1% of the
+spectrum at High, but 5% at Low and almost 50% at the lowest level. Three causes, three fixes:
+
+1. **Aliasing.** Upstream samples the exhaust runner pressure for the synthesizer once per
+   rigid-body step, after 8 fluid sub-steps. At lower step rates, fluid-rate ripple folds
+   into the audible band. The port averages the pressure over all fluid sub-steps instead. At
+   the default frequencies this is a box filter with its first null above 20 kHz, so High
+   sounds the same as upstream.
+2. **Input anti-aliasing.** The synthesizer's input low-pass is fixed at 1.9 kHz. At reduced
+   frequencies the port lowers it to 0.3 × the input rate so interpolation images can't pass.
+   High keeps 1.9 kHz.
+3. **Too few fluid steps.** Below 6 sub-steps the gas simulation rings on its own, so the
+   lighter levels only reduce the rigid-body rate.
+
+The port also rescales the exhaust delay lines when the frequency changes. Upstream sizes
+them for 10,000 steps/s, so pulse timing would otherwise drift with the frequency and change
+the timbre.
+
+With these fixes, idle 1–3 kHz content measured from native renders is 0.6–2% on every
+level.
 
 ## How it works
 
@@ -145,6 +179,10 @@ with its submodules, and `native/patch_upstream.py` applies these minimal patche
 - Synthesizer: a non-blocking render path for single-threaded builds (`ESWEB_SINGLE_THREAD`),
   and the Delta Studio include removed.
 - Convolution filter: the contiguous / SIMD version described above.
+- Piston engine simulator: synthesizer input averaged over fluid sub-steps (see *Audio
+  quality*), and removal of an unused `static double lastValveLift[8]` that was indexed by
+  cylinder number. It overflowed on 10- and 12-cylinder engines (undefined behavior upstream
+  too).
 
 `native/bridge.cpp` replaces `EngineSimApplication`. It loads scripts, ports the input handling
 of `processEngineInput()` (throttle smoothing, clutch, dyno sweep and hold), reads the WAV

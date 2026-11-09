@@ -6,7 +6,8 @@ const VERSION = new URL(self.location.href).searchParams.get('v') || 'dev';
 importScripts('engine.js?v=' + VERSION);
 
 const SAMPLE_RATE = 44100;
-const TARGET_LEAD = Math.round(SAMPLE_RATE * 0.07); // ~70 ms of queued audio
+// Queued audio: ~70 ms normally, more on the light levels to ride out CPU hiccups.
+const leadTarget = () => Math.round(SAMPLE_RATE * (level >= 2 ? 0.12 : 0.07));
 const STATE_INTERVAL = 1000 / 60;
 
 let M = null;
@@ -26,14 +27,18 @@ let gen = 0;
 // and impulse-response length (convolution cost).
 const LEVELS = [
   { name: 'High', fs: 1.0, fluid: 8, ir: 10000 },
-  { name: 'Medium', fs: 0.75, fluid: 6, ir: 6000 },
-  { name: 'Low', fs: 0.5, fluid: 4, ir: 3000 },
-  { name: 'Very low', fs: 0.35, fluid: 3, ir: 1500 },
+  { name: 'Medium', fs: 0.5, fluid: 8, ir: 6000 },
+  { name: 'Low', fs: 0.25, fluid: 8, ir: 3000 },
+  { name: 'Very low', fs: 0.15, fluid: 8, ir: 1500 },
+  { name: 'Ultra low', fs: 0.1, fluid: 6, ir: 800 },
 ];
 let qualityMode = 'auto';   // 'auto' or a level index
 let level = 1;
 let load = 0;               // processing time / simulated time (1.0 = just real time)
 let lastLevelChange = 0;
+let underruns = 0;
+let underrunsSeen = 0;
+let lastDowngrade = -1e9;
 
 function applyLevel(l, reason) {
   level = Math.max(0, Math.min(LEVELS.length - 1, l));
@@ -48,11 +53,20 @@ function applyLevel(l, reason) {
 }
 
 function autoQuality(now, spentMs, simMs) {
-  if (qualityMode !== 'auto' || simMs <= 0) return;
-  load = load * 0.97 + 0.03 * (spentMs / simMs);
+  if (simMs <= 0) return;
   const since = now - lastLevelChange;
-  if (load > 0.8 && since > 1500 && level < LEVELS.length - 1) applyLevel(level + 1, 'cpu');
-  else if (load < 0.3 && since > 8000 && level > 0) applyLevel(level - 1, 'headroom');
+  if (since < 1000) { underrunsSeen = underruns; return; }  // switching itself causes a spike
+  load = load * 0.97 + 0.03 * (spentMs / simMs);
+  if (qualityMode !== 'auto') { underrunsSeen = underruns; return; }
+  // Audio gaps are the clearest sign the CPU can't keep up.
+  const newGaps = underruns - underrunsSeen;
+  underrunsSeen = underruns;
+  if (since > 1500 && level < LEVELS.length - 1 && (load > 0.75 || (newGaps > 0 && since > 2500))) {
+    lastDowngrade = now;
+    applyLevel(level + 1, 'cpu');
+  } else if (load < 0.28 && since > 8000 && now - lastDowngrade > 30000 && level > 0) {
+    applyLevel(level - 1, 'headroom');
+  }
 }
 
 function send(msg, transfer) { postMessage(msg, transfer || []); }
@@ -118,7 +132,7 @@ function tick() {
 
   if (loaded) {
     const lead = written - consumed;
-    const want = Math.max(0, Math.min(4000, TARGET_LEAD - lead));
+    const want = Math.max(0, Math.min(6000, leadTarget() - lead));
     let n = 0;
     try {
       const f0 = performance.now();
@@ -150,7 +164,7 @@ function tick() {
       const sc = new Float32Array(scope.length);
       sc.set(scope.subarray(scopePos));
       sc.set(scope.subarray(0, scopePos), scope.length - scopePos);
-      send({ type: 'state', gen, load, state, frame, scope: sc, audioLead: (written - consumed) / SAMPLE_RATE },
+      send({ type: 'state', gen, load, underruns, state, frame, scope: sc, audioLead: (written - consumed) / SAMPLE_RATE },
         [state.buffer, frame.buffer, sc.buffer]);
     }
   }
@@ -166,6 +180,7 @@ onmessage = async (ev) => {
       if (audioPort) {
         audioPort.onmessage = (e) => {
           if (e.data && e.data.consumed !== undefined) consumed = e.data.consumed;
+          if (e.data && e.data.underruns !== undefined) underruns = e.data.underruns;
           if (e.data && e.data.reset) { written = 0; consumed = 0; }
         };
       }
